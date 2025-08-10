@@ -1,141 +1,140 @@
-#(©)CodeXBotz
-
-import os
-import asyncio
+# © @TheAlphaBotz for this code 
+# @TheAlphaBotz [2021-2025]
+# © Utkarsh dubey [github.com/utkarshdubey2008]
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated, UserBannedInChannel
+from pyrogram.enums import ParseMode, ChatMemberStatus, ChatType
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatJoinRequest
+from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated, UserBannedInChannel, UserNotParticipant
+import datetime
+import asyncio
 
 from bot import Bot
 from config import (
     ADMINS, FORCE_MSG, START_MSG, CUSTOM_CAPTION, DISABLE_CHANNEL_BUTTON, 
-    PROTECT_CONTENT, START_PIC, AUTO_DELETE_TIME, AUTO_DELETE_MSG, 
-    JOIN_REQUEST_ENABLE, FORCE_SUB_CHANNEL, HEAVY_LOAD_MSG, OWNER_ID
+    PROTECT_CONTENT, START_PIC, AUTO_DELETE_TIME, AUTO_DELETE_MSG,
+    JOIN_REQUEST_ENABLED, FORCE_SUB_CHANNELS, OWNER_ID, HEAVY_LOAD_MSG,
+    CHANNEL_ID
 )
-from helper_func import (
-    subscribed, decode, process_file_request, delete_file
+from helper_func import subscribed, decode, process_file_request, delete_file, get_messages
+from database.database import (
+    add_user, del_user, full_userbase, present_user,
+    add_join_request, remove_join_request, check_join_request,
+    clean_old_requests
 )
-from database.database import add_user, del_user, full_userbase, present_user
-from datetime import datetime
 
-# Function to send media files to user
-async def send_media_and_reply(client, message, messages, temp_msg=None):
-    """Send retrieved media files to the user"""
-    track_msgs = []
+async def send_file(client, message, file_id):
+    try:
+        if file_id.startswith('http'):
+            await message.reply_document(file_id)
+        else:
+            messages = await get_messages(client, int(file_id))
+            for msg in messages:
+                await msg.copy(
+                    chat_id=message.from_user.id,
+                    protect_content=PROTECT_CONTENT
+                )
+    except Exception as e:
+        await message.reply_text(f"Error: {str(e)}")
+
+async def check_user_auth(client, user_id: int):
+    if not FORCE_SUB_CHANNELS:
+        return True
     
-    for msg in messages:
-        if not msg:
+    for channel_id in FORCE_SUB_CHANNELS:
+        try:
+            member = await client.get_chat_member(channel_id, user_id)
+            if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                if JOIN_REQUEST_ENABLED:
+                    has_request = await check_join_request(user_id, channel_id)
+                    if not has_request:
+                        return False
+                else:
+                    return False
+        except UserNotParticipant:
+            return False
+        except Exception as e:
             continue
             
-        try:
-            if bool(CUSTOM_CAPTION) and bool(msg.document):
-                caption = CUSTOM_CAPTION.format(
-                    previouscaption="" if not msg.caption else msg.caption.html, 
-                    filename=msg.document.file_name
-                )
-            else:
-                caption = "" if not msg.caption else msg.caption.html
+    return True
 
-            if DISABLE_CHANNEL_BUTTON:
-                reply_markup = msg.reply_markup
-            else:
-                reply_markup = None
-                
-            # Send the file
-            if AUTO_DELETE_TIME and AUTO_DELETE_TIME > 0:
-                copied_msg = await msg.copy(
-                    chat_id=message.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
-                if copied_msg:
-                    track_msgs.append(copied_msg)
-            else:
-                await msg.copy(
-                    chat_id=message.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
+async def generate_invite_links(client, user_id):
+    buttons = []
+    try:
+        for channel_id in FORCE_SUB_CHANNELS:
+            chat = await client.get_chat(channel_id)
             
-            # Add small delay between files to avoid rate limits
-            await asyncio.sleep(0.7)
-            
-        except FloodWait as e:
-            await asyncio.sleep(e.value + 1)
-            # Retry sending after FloodWait
-            if AUTO_DELETE_TIME and AUTO_DELETE_TIME > 0:
-                copied_msg = await msg.copy(
-                    chat_id=message.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
-                if copied_msg:
-                    track_msgs.append(copied_msg)
+            if JOIN_REQUEST_ENABLED:
+                try:
+                    invite = await client.create_chat_invite_link(
+                        chat_id=channel_id,
+                        creates_join_request=True,
+                        name=f"User_{user_id}_{datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                    )
+                    link = invite.invite_link
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                    continue
             else:
-                await msg.copy(
-                    chat_id=message.from_user.id,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                    protect_content=PROTECT_CONTENT
-                )
-        except Exception as e:
-            print(f"Error sending message: {e}")
+                link = f"https://t.me/{chat.username}" if chat.username else chat.invite_link
+            
+            if link:
+                buttons.append([InlineKeyboardButton(f"📢 Join {chat.title}", url=link)])
+    except Exception as e:
+        print(f"Error generating invite links: {e}")
     
-    # Handle auto-deletion
-    if track_msgs and AUTO_DELETE_TIME > 0:
-        delete_data = await message.reply_text(AUTO_DELETE_MSG.format(time=AUTO_DELETE_TIME))
-        asyncio.create_task(delete_file(track_msgs, client, delete_data))
+    if buttons:
+        buttons.append([InlineKeyboardButton("🔄 Check Subscription", callback_data=f"checksub_{user_id}")])
     
-    # Clean up temp message
-    if temp_msg:
-        try:
-            await temp_msg.delete()
-        except:
-            pass
+    return InlineKeyboardMarkup(buttons) if buttons else None
 
-@Bot.on_message(filters.command('start') & filters.private & subscribed)
+@Bot.on_message(filters.command('start') & filters.private)
 async def start_command(client: Client, message: Message):
-    id = message.from_user.id
-    # Add user to database if not exists
-    if not await present_user(id):
-        try:
-            await add_user(id)
-        except:
-            pass
+    user_id = message.from_user.id
     
+    try:
+        if not await present_user(user_id):
+            await add_user(user_id)
+    except Exception as e:
+        pass
+
+    if not await check_user_auth(client, user_id):
+        buttons = await generate_invite_links(client, user_id)
+        if buttons:
+            await message.reply(
+                text=FORCE_MSG.format(
+                    first=message.from_user.first_name,
+                    last=message.from_user.last_name,
+                    username=None if not message.from_user.username else '@' + message.from_user.username,
+                    mention=message.from_user.mention,
+                    id=user_id
+                ),
+                reply_markup=buttons,
+                quote=True,
+                disable_web_page_preview=True
+            )
+            return
+
     text = message.text
-    
     if len(text) > 7:
         try:
             base64_string = text.split(" ", 1)[1]
             string = await decode(base64_string)
-            
-            # Process the request directly without queuing
             await process_file_request(client, message, string)
             return
         except Exception as e:
-            # Handle invalid links more gracefully
-            await message.reply_text("Invalid link or format. Please use a valid file link.", quote=True)
-            print(f"Error decoding start command: {e}")
             return
-    
-    # Handle normal /start command
-    reply_markup = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("😊 About Me", callback_data="about"),
-                InlineKeyboardButton("🔒 Close", callback_data="close")
-            ]
-        ]
-    )
+
+    if len(text) == 6:
+        try:
+            await send_file(client, message, text)
+            return
+        except Exception as e:
+            return
+
+    reply_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("😊 About Me", callback_data="about"),
+        InlineKeyboardButton("🔒 Close", callback_data="close")
+    ]])
     
     if START_PIC:
         await message.reply_photo(
@@ -145,7 +144,7 @@ async def start_command(client: Client, message: Message):
                 last=message.from_user.last_name,
                 username=None if not message.from_user.username else '@' + message.from_user.username,
                 mention=message.from_user.mention,
-                id=message.from_user.id
+                id=user_id
             ),
             reply_markup=reply_markup,
             quote=True
@@ -157,131 +156,62 @@ async def start_command(client: Client, message: Message):
                 last=message.from_user.last_name,
                 username=None if not message.from_user.username else '@' + message.from_user.username,
                 mention=message.from_user.mention,
-                id=message.from_user.id
+                id=user_id
             ),
             reply_markup=reply_markup,
             disable_web_page_preview=True,
             quote=True
         )
 
-@Bot.on_message(filters.command('start') & filters.private)
-async def not_joined(client: Client, message: Message):
-    """Handle users who haven't subscribed to required channel"""
-    if bool(JOIN_REQUEST_ENABLE):
-        invite = await client.create_chat_invite_link(
-            chat_id=FORCE_SUB_CHANNEL,
-            creates_join_request=True
-        )
-        ButtonUrl = invite.invite_link
-    else:
-        ButtonUrl = client.invitelink
-
-    buttons = [
-        [
-            InlineKeyboardButton(
-                "Join Channel",
-                url = ButtonUrl)
-        ]
-    ]
-
-    try:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text = 'Try Again',
-                    url = f"https://t.me/{client.username}?start={message.command[1]}"
-                )
-            ]
-        )
-    except IndexError:
-        pass
-
-    await message.reply(
-        text = FORCE_MSG.format(
-                first = message.from_user.first_name,
-                last = message.from_user.last_name,
-                username = None if not message.from_user.username else '@' + message.from_user.username,
-                mention = message.from_user.mention,
-                id = message.from_user.id
-            ),
-        reply_markup = InlineKeyboardMarkup(buttons),
-        quote = True,
-        disable_web_page_preview = True
-    )
-
-@Bot.on_message(filters.command('users') & filters.private & filters.user(ADMINS))
-async def get_users(client: Bot, message: Message):
-    """Admin command to view bot users count"""
-    msg = await client.send_message(chat_id=message.chat.id, text="Counting users...")
-    users = await full_userbase()
-    await msg.edit(f"{len(users)} users are using this bot")
-
-@Bot.on_message(filters.private & filters.command('broadcast') & filters.user(OWNER_ID))
-async def send_text(client: Bot, message: Message):
-    """Owner command to broadcast message to all users"""
-    if message.reply_to_message:
-        query = await full_userbase()
-        broadcast_msg = message.reply_to_message
-        total = 0
-        successful = 0
-        blocked = 0
-        deleted = 0
-        unsuccessful = 0
-        
-        pls_wait = await message.reply("<i>Broadcasting Message.. This will Take Some Time</i>")
-        start_time = datetime.now()
-        
-        for chat_id in query:
+@Bot.on_callback_query(filters.regex("^checksub_"))
+async def check_subscription_callback(client: Client, callback: CallbackQuery):
+    user_id = int(callback.data.split("_")[1])
+    
+    if callback.from_user.id != user_id:
+        return await callback.answer("This button is not for you!", show_alert=True)
+    
+    if await check_user_auth(client, user_id):
+        string = callback.message.command[1] if len(callback.message.command) > 1 else None
+        if string:
             try:
-                await broadcast_msg.copy(chat_id)
-                successful += 1
-            except FloodWait as e:
-                await asyncio.sleep(e.value)
-                try:
-                    await broadcast_msg.copy(chat_id)
-                    successful += 1
-                except:
-                    unsuccessful += 1
-            except UserIsBlocked:
-                await del_user(chat_id)
-                blocked += 1
-            except InputUserDeactivated:
-                await del_user(chat_id)
-                deleted += 1
-            except Exception as e:
-                print(f"Error broadcasting to {chat_id}: {e}")
-                unsuccessful += 1
-            total += 1
-            
-            # Show progress every 50 users
-            if total % 50 == 0:
-                progress = f"""<b>Broadcast Progress 📊</b>
-                
-<b>Total Users:</b> {len(query)}
-<b>Completed:</b> {total} / {len(query)} (<code>{total/len(query)*100:.1f}%</code>)
-<b>Success:</b> {successful}
-<b>Failed:</b> {unsuccessful + blocked + deleted}
-
-<i>Please wait, broadcasting in progress...</i>"""
-                await pls_wait.edit(progress)
-        
-        time_taken = datetime.now() - start_time
-        
-        status = f"""<b>✅ Broadcast Completed</b>
-
-<b>📊 Statistics:</b>
-• <b>Total Users:</b> <code>{total}</code>
-• <b>Successful:</b> <code>{successful}</code> (<code>{successful/total*100:.1f}%</code>)
-• <b>Blocked Users:</b> <code>{blocked}</code>
-• <b>Deleted Accounts:</b> <code>{deleted}</code>
-• <b>Failed Delivery:</b> <code>{unsuccessful}</code>
-
-<b>⏱ Time Taken:</b> <code>{time_taken.seconds}</code> seconds
-
-<i>Note: Blocked and deleted users have been removed from the database</i>"""
-        
-        return await pls_wait.edit(status)
+                string = await decode(string)
+                await process_file_request(client, callback.message, string)
+            except:
+                pass
+        else:
+            await callback.message.delete()
+            if START_PIC:
+                await callback.message.reply_photo(photo=START_PIC)
+            else:
+                await callback.message.reply_text(START_MSG)
     else:
-        msg = await message.reply("❌ Please reply to a message to broadcast it to users.")
-        await asyncio.sleep(5)
-        await msg.delete()
+        await callback.answer("Join the channels first!", show_alert=True)
+
+@Bot.on_chat_join_request()
+async def handle_join_request(client: Client, join_request: ChatJoinRequest):
+    if join_request.chat.id in FORCE_SUB_CHANNELS:
+        try:
+            await add_join_request(join_request.from_user.id, join_request.chat.id)
+        except Exception as e:
+            pass
+
+@Bot.on_chat_member_updated()
+async def handle_member_update(client: Client, chat_member_updated):
+    if chat_member_updated.chat.id in FORCE_SUB_CHANNELS:
+        if chat_member_updated.new_chat_member and chat_member_updated.new_chat_member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            try:
+                await remove_join_request(chat_member_updated.from_user.id, chat_member_updated.chat.id)
+            except Exception as e:
+                pass
+
+async def cleanup_old_requests():
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            await clean_old_requests(24)
+        except Exception as e:
+            pass
+
+if __name__ == "__main__":
+    asyncio.create_task(cleanup_old_requests())
+    Bot.run()
