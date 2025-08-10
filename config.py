@@ -64,7 +64,7 @@ PROTECT_CONTENT = True if os.environ.get('PROTECT_CONTENT', "True") == "True" el
 
 # Join Req Config
 
-JOIN_REQUEST_ENABLED = os.environ.get("JOIN_REQUEST_ENABLED", "True") == "True"
+JOIN_REQUEST_ENABLE = os.environ.get("JOIN_REQUEST_ENABLED", "True") == "True"
 FORCE_SUB_CHANNELS = [int(x) for x in os.environ.get("FORCE_SUB_CHANNELS", "-1002759209644").split(",") if x]
 
 REQUEST_TRACKING_COLLECTION = os.environ.get("REQUEST_TRACKING_COLLECTION", "join_requests")
